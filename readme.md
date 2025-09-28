@@ -1,4 +1,22 @@
 
+## project is obsolete.
+
+Due to changes in the way that Luanti downloads remote media, operating
+this project or a server based on it's implementation no longer does
+anything. Effectively, this project is dead.
+
+At this point in time, there is not likely to be a POST based CDN
+solution to remote media. The client now GET's index.mth and no longer
+does any negotiating or attempting to fetch by hash. So even operating
+a cache directory won't work unless it includes a massive index.mth. For
+reference, the index.mth from the PRMS would have to be 6+ MB large to
+capture the 140k files it was hosting.
+
+Any solution will likely be a new codebase, so, this project will become
+archived for now.
+    --sofar
+
+
 ## mtmediasrv
 
 A Minetest Media server implementation as fcgi server.
