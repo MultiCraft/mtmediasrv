@@ -98,7 +98,7 @@ func (s FastCGIServer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	clientarr := make([]string, 0)
 	for {
 		h := make([]byte, 20)
-		_, err := req.Body.Read(h)
+		_, err := io.ReadFull(req.Body, h)
 		if err != nil {
 			break
 		}
