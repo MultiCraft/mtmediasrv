@@ -20,6 +20,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
@@ -118,12 +119,18 @@ func (s FastCGIServer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	headers.Add("Content-Type", "octet/stream")
 	headers.Add("Content-Length", fmt.Sprintf("%d", 6+(len(resultmap)*20)))
 
-	c1, _ := w.Write([]byte(header))
-	c2, _ := w.Write([]byte(version))
+	buf := bufio.NewWriter(w)
+	defer buf.Flush()
+
+	c1, _ := buf.Write(header)
+	c2, _ := buf.Write(version)
 	c := c1 + c2
 	for k := range resultmap {
-		b, _ := hex.DecodeString(k)
-		c3, _ := w.Write([]byte(b))
+		b, err := hex.DecodeString(k)
+		if err != nil {
+			log.Print("Error decoding hex (should be impossible):", err)
+		}
+		c3, _ := buf.Write(b)
 		c = c + c3
 	}
 
