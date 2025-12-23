@@ -22,6 +22,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"github.com/spf13/viper"
@@ -53,9 +54,19 @@ func (writer logWriter) Write(bytes []byte) (int, error) {
 	return fmt.Print(string(bytes))
 }
 
-type FastCGIServer struct{}
+func readHashes(r io.Reader) (clientarr []string) {
+	for {
+		h := make([]byte, 20)
+		_, err := io.ReadFull(r, h)
+		if err != nil {
+			break
+		}
+		clientarr = append(clientarr, hex.EncodeToString(h))
+	}
+	return
+}
 
-func (s FastCGIServer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+func serveIndex(w http.ResponseWriter, req *http.Request) {
 	header := make([]byte, 4)
 	version := make([]byte, 2)
 
@@ -95,15 +106,7 @@ func (s FastCGIServer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// read client needed hashes
-	clientarr := make([]string, 0)
-	for {
-		h := make([]byte, 20)
-		_, err := io.ReadFull(req.Body, h)
-		if err != nil {
-			break
-		}
-		clientarr = append(clientarr, hex.EncodeToString(h))
-	}
+	clientarr := readHashes(req.Body)
 
 	// Iterate over client hashes and remove hashes that we don't have from it
 	resultmap := map[string]bool{}
@@ -115,11 +118,14 @@ func (s FastCGIServer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	// formulate response
 	headers := w.Header()
-	headers.Add("Content-Type", "octet/stream")
+	headers.Add("Content-Type", "application/octet-stream")
 	headers.Add("Content-Length", fmt.Sprintf("%d", 6+(len(resultmap)*20)))
 
-	c1, _ := w.Write([]byte(header))
-	c2, _ := w.Write([]byte(version))
+	// Send version 2 to advertise that we support the combined format and to
+	// prevent clients that don't support it from trying to use remote media
+	// as requesting each file individually seems to be slower
+	c1, _ := w.Write(header)
+	c2, _ := w.Write([]byte{0x00, 0x02})
 	c := c1 + c2
 	for k := range resultmap {
 		b, _ := hex.DecodeString(k)
@@ -129,6 +135,57 @@ func (s FastCGIServer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	// log transaction
 	log.Print(remoteip, " '", req.UserAgent(), "' ", len(resultmap), "/", len(clientarr), " ", c, " ", r)
+}
+
+type BulkDownloadServer struct {
+	webroot string
+}
+
+func (s BulkDownloadServer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	clientarr := readHashes(req.Body)
+	if len(clientarr) > 100 {
+		return
+	}
+
+	for _, v := range clientarr {
+		if !arr[v] {
+			// Unknown file
+			binary.Write(w, binary.BigEndian, uint32(0))
+			continue
+		}
+
+		path := filepath.Join(s.webroot, v)
+		var fi os.FileInfo
+		f, err := os.Open(path)
+		if err == nil {
+			fi, err = f.Stat()
+		}
+
+		if err != nil {
+			binary.Write(w, binary.BigEndian, uint32(0))
+			f.Close()
+			continue
+		}
+
+		length := fi.Size()
+		binary.Write(w, binary.BigEndian, uint32(length))
+
+		copied, err := io.Copy(w, f)
+		f.Close()
+
+		if err != nil {
+			log.Printf("Error reading from file: %v\n", err)
+			break
+		}
+
+		// Sanity check, if this fails then the stream is corrupt and there's
+		// no point trying to send any more files down it (the client should
+		// detect that it doesn't match the checksum)
+		if copied != length {
+			log.Printf("Read %d bytes from file %s, but expected %d\n", copied, v, length)
+			break
+		}
+	}
 }
 
 func getHash(path string) (string, error) {
@@ -291,11 +348,12 @@ func main() {
 
 	defer listener.Close()
 
-	h := new(FastCGIServer)
-
 	log.Print("version ", Version, " (", Build, ") started")
 
-	err = fcgi.Serve(listener, h)
+	http.HandleFunc("/media/index.mth", serveIndex)
+	http.Handle("/media/bulk-download", BulkDownloadServer{webroot: w})
+
+	err = fcgi.Serve(listener, nil)
 	if err != nil {
 		log.Fatal("fcgi.Serve: ", err)
 	}
