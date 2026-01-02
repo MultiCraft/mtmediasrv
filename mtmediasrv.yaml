@@ -29,3 +29,6 @@
 # - /home/minetest/git/minetest
 # - /home/minetest/git/minetest_game
 
+# API token for Prometheus metrics API.
+# If unspecified, the metrics API is disabled.
+# metrics_token: abc

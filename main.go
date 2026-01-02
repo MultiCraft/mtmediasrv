@@ -22,6 +22,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha1"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 )
 
 var (
@@ -44,6 +46,12 @@ var (
 	newmedia int
 
 	arr map[string]bool
+
+	uploadedBytes atomic.Uint64
+	totalHits atomic.Uint64
+	totalMisses atomic.Uint64
+
+	metricsToken string
 )
 
 // Change our logging to be journalctl friendly
@@ -110,11 +118,18 @@ func serveIndex(w http.ResponseWriter, req *http.Request) {
 
 	// Iterate over client hashes and remove hashes that we don't have from it
 	resultmap := map[string]bool{}
+	var hits, misses uint64
 	for _, v := range clientarr {
 		if arr[v] {
 			resultmap[v] = true
+			hits += 1
+		} else {
+			misses += 1
 		}
 	}
+
+	totalHits.Add(hits)
+	totalMisses.Add(misses)
 
 	// formulate response
 	headers := w.Header()
@@ -135,6 +150,7 @@ func serveIndex(w http.ResponseWriter, req *http.Request) {
 
 	// log transaction
 	log.Print(remoteip, " '", req.UserAgent(), "' ", len(resultmap), "/", len(clientarr), " ", c, " ", r)
+	uploadedBytes.Add(uint64(c))
 }
 
 type BulkDownloadServer struct {
@@ -173,6 +189,8 @@ func (s BulkDownloadServer) ServeHTTP(w http.ResponseWriter, req *http.Request) 
 		copied, err := io.Copy(w, f)
 		f.Close()
 
+		uploadedBytes.Add(2 + uint64(copied))
+
 		if err != nil {
 			log.Printf("Error reading from file: %v\n", err)
 			break
@@ -186,6 +204,27 @@ func (s BulkDownloadServer) ServeHTTP(w http.ResponseWriter, req *http.Request) 
 			break
 		}
 	}
+}
+
+func serveMetrics(w http.ResponseWriter, req *http.Request) {
+	auth := req.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") || subtle.ConstantTimeCompare([]byte(auth[7:]), []byte(metricsToken)) != 1 {
+		http.Error(w, "Invalid metrics token", 401)
+		return
+	}
+
+	w.Header().Add("Content-Type", "text/plain")
+	fmt.Fprintln(w, "# HELP upload_bytes_count The (approximate) number of bytes uploaded to clients")
+	fmt.Fprintln(w, "# TYPE upload_bytes_count counter")
+	fmt.Fprintf(w, "upload_bytes_count %d\n\n", uploadedBytes.Load())
+
+	fmt.Fprintln(w, "# HELP hits_count The number of requests for files that we have")
+	fmt.Fprintln(w, "# TYPE hits_count counter")
+	fmt.Fprintf(w, "hits_count %d\n\n", totalHits.Load())
+
+	fmt.Fprintln(w, "# HELP misses_count The number of requests for files we do not have")
+	fmt.Fprintln(w, "# TYPE misses_count counter")
+	fmt.Fprintf(w, "misses_count %d\n", totalMisses.Load())
 }
 
 func getHash(path string) (string, error) {
@@ -300,10 +339,11 @@ func main() {
 		// Translations
 		".tr",
 	})
+	viper.SetDefault("metrics_token", "")
 
 	err := viper.ReadInConfig()
 	if err != nil {
-		log.Fatal("Error in confog file: ", err)
+		log.Fatal("Error in config file: ", err)
 	}
 
 	// step 1, collect media files
@@ -352,6 +392,11 @@ func main() {
 
 	http.HandleFunc("/media/index.mth", serveIndex)
 	http.Handle("/media/bulk-download", BulkDownloadServer{webroot: w})
+
+	metricsToken = viper.GetString("metrics_token")
+	if metricsToken != "" {
+		http.HandleFunc("/media/metrics", serveMetrics)
+	}
 
 	err = fcgi.Serve(listener, nil)
 	if err != nil {
