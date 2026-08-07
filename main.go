@@ -390,8 +390,12 @@ func main() {
 
 	log.Print("version ", Version, " (", Build, ") started")
 
+	bulkServer := BulkDownloadServer{webroot: w}
 	http.HandleFunc("/media/index.mth", serveIndex)
-	http.Handle("/media/bulk-download", BulkDownloadServer{webroot: w})
+	http.Handle("/media/bulk-download", bulkServer)
+
+	http.HandleFunc("/index.mth", serveIndex)
+	http.Handle("/bulk-download", bulkServer)
 
 	metricsToken = viper.GetString("metrics_token")
 	if metricsToken != "" {
